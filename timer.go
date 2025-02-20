@@ -112,20 +112,41 @@ func drawTimer(hdc win.HDC) {
     seconds := int(elapsed.Seconds()) % 60
     timeStr := fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 
-    // Use default system font
-    win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.SYSTEM_FONT)))
+    // Create a logical font
+    font := win.LOGFONT{
+        LfHeight:         -48, // Negative value for character height
+        LfWidth:          0,   // Match height ratio
+        LfWeight:         win.FW_BOLD,
+        LfCharSet:        win.ANSI_CHARSET,
+        LfOutPrecision:   win.OUT_TT_PRECIS,
+        LfClipPrecision:  win.CLIP_DEFAULT_PRECIS,
+        LfQuality:        win.CLEARTYPE_QUALITY,
+        LfPitchAndFamily: win.DEFAULT_PITCH | win.FF_DONTCARE,
+    }
+    
+    // Copy "Arial" into the lfFaceName array
+    copy(font.LfFaceName[:], syscall.StringToUTF16("Arial"))
+
+    // Create the font using CreateFontIndirect
+    hFont := win.CreateFontIndirect(&font)
+    if hFont == 0 {
+        return
+    }
+    defer win.DeleteObject(win.HGDIOBJ(hFont))
+
+    // Select the new font into the DC
+    win.SelectObject(hdc, win.HGDIOBJ(hFont))
     
     // Set text color and background mode
     win.SetTextColor(hdc, 0)
     win.SetBkMode(hdc, win.TRANSPARENT)
 
     // Draw the text
-    timeStrPtr := syscall.StringToUTF16Ptr(timeStr)
     win.TextOut(
         hdc,
-        90,  // x position
-        50,  // y position
-        timeStrPtr,
+        50,  // x position
+        30,  // y position
+        syscall.StringToUTF16Ptr(timeStr),
         int32(len(timeStr)),
     )
 }
