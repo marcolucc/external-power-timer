@@ -1,201 +1,224 @@
 package main
 
 import (
-    "fmt"
-    "github.com/gin-gonic/gin"
-    "github.com/lxn/win"
-    "log"
-    "net/http"
-    "syscall"
-    "time"
-    "unsafe"
+	"fmt"
+	"log"
+	"net/http"
+	"syscall"
+	"time"
+	"unsafe"
+
+	"github.com/gin-gonic/gin"
+	"github.com/lxn/win"
 )
 
 var (
-    hwnd      win.HWND
-    startTime time.Time
-    isVisible bool
+	hwnd      win.HWND
+	startTime time.Time
+	isVisible bool
+	timer     *time.Ticker
+	done      chan bool
 )
 
 const (
-    className  = "GeneratorTimerClass"
-    windowName = "Generator Timer"
+	className  = "GeneratorTimerClass"
+	windowName = "Generator Timer"
 )
 
 func main() {
-    // Start HTTP server in a goroutine
-    go startServer()
+	// Initialize channels for cleanup
+	done = make(chan bool)
 
-    // Initialize and register the window class
-    hinst := win.GetModuleHandle(nil)
-    if hinst == 0 {
-        log.Fatal("GetModuleHandle failed")
-    }
+	// Start HTTP server in a goroutine
+	go startServer()
 
-    wcx := &win.WNDCLASSEX{
-        CbSize:        uint32(unsafe.Sizeof(win.WNDCLASSEX{})),
-        LpfnWndProc:   syscall.NewCallback(wndProc),
-        HInstance:     hinst,
-        HbrBackground: win.HBRUSH(win.GetStockObject(win.WHITE_BRUSH)),
-        LpszClassName: syscall.StringToUTF16Ptr(className),
-    }
+	// Initialize and register the window class
+	hinst := win.GetModuleHandle(nil)
+	if hinst == 0 {
+		log.Fatal("GetModuleHandle failed")
+	}
 
-    if atom := win.RegisterClassEx(wcx); atom == 0 {
-        log.Fatal("RegisterClassEx failed")
-    }
+	wcx := &win.WNDCLASSEX{
+		CbSize:        uint32(unsafe.Sizeof(win.WNDCLASSEX{})),
+		LpfnWndProc:   syscall.NewCallback(wndProc),
+		HInstance:     hinst,
+		HbrBackground: win.HBRUSH(win.GetStockObject(win.WHITE_BRUSH)),
+		LpszClassName: syscall.StringToUTF16Ptr(className),
+	}
 
-    // Create the window (initially hidden)
-    hwnd = win.CreateWindowEx(
-        0,
-        syscall.StringToUTF16Ptr(className),
-        syscall.StringToUTF16Ptr(windowName),
-        win.WS_OVERLAPPEDWINDOW,
-        win.CW_USEDEFAULT,
-        win.CW_USEDEFAULT,
-        300,
-        150,
-        0,
-        0,
-        hinst,
-        nil,
-    )
+	if atom := win.RegisterClassEx(wcx); atom == 0 {
+		log.Fatal("RegisterClassEx failed")
+	}
 
-    if hwnd == 0 {
-        log.Fatal("CreateWindowEx failed")
-    }
+	// Create the window (initially hidden)
+	hwnd = win.CreateWindowEx(
+		0,
+		syscall.StringToUTF16Ptr(className),
+		syscall.StringToUTF16Ptr(windowName),
+		win.WS_OVERLAPPEDWINDOW,
+		win.CW_USEDEFAULT,
+		win.CW_USEDEFAULT,
+		300,
+		150,
+		0,
+		0,
+		hinst,
+		nil,
+	)
 
-    // Start message loop
-    var msg win.MSG
-    for {
-        if ret := win.GetMessage(&msg, 0, 0, 0); ret == 0 || ret == -1 {
-            break
-        }
-        win.TranslateMessage(&msg)
-        win.DispatchMessage(&msg)
-    }
+	if hwnd == 0 {
+		log.Fatal("CreateWindowEx failed")
+	}
+
+	// Message loop
+	var msg win.MSG
+	for {
+		if ret := win.GetMessage(&msg, 0, 0, 0); ret == 0 || ret == -1 {
+			break
+		}
+		win.TranslateMessage(&msg)
+		win.DispatchMessage(&msg)
+	}
+
+	// Cleanup when the message loop ends
+	if timer != nil {
+		timer.Stop()
+	}
+	close(done)
 }
 
 func wndProc(hwnd win.HWND, msg uint32, wparam, lparam uintptr) uintptr {
-    switch msg {
-    case win.WM_PAINT:
-        if isVisible {
-            var ps win.PAINTSTRUCT
-            hdc := win.BeginPaint(hwnd, &ps)
-            drawTimer(hdc)
-            win.EndPaint(hwnd, &ps)
-        }
-        return 0
-    case win.WM_CLOSE:
-        // Prevent the user from closing the window
-        return 0
-    case win.WM_SYSCOMMAND:
-        if wparam == win.SC_MINIMIZE {
-            // Prevent minimizing the window
-            return 0
-        }
-    case win.WM_DESTROY:
-        win.PostQuitMessage(0)
-        return 0
-    default:
-        return win.DefWindowProc(hwnd, msg, wparam, lparam)
-    }
-	return 0
+	switch msg {
+	case win.WM_PAINT:
+		if isVisible {
+			var ps win.PAINTSTRUCT
+			hdc := win.BeginPaint(hwnd, &ps)
+			if hdc != 0 {
+				drawTimer(hdc)
+				win.EndPaint(hwnd, &ps)
+			}
+		}
+		return 0
+	case win.WM_CLOSE:
+		win.DestroyWindow(hwnd)
+		return 0
+	case win.WM_SYSCOMMAND:
+		if wparam == win.SC_MINIMIZE {
+			// Allow minimizing but keep the window visible
+			return win.DefWindowProc(hwnd, msg, wparam, lparam)
+		}
+	case win.WM_DESTROY:
+		win.PostQuitMessage(0)
+		return 0
+	}
+	return win.DefWindowProc(hwnd, msg, wparam, lparam)
 }
 
-
-
-
 func drawTimer(hdc win.HDC) {
-    elapsed := time.Since(startTime)
-    hours := int(elapsed.Hours())
-    minutes := int(elapsed.Minutes()) % 60
-    seconds := int(elapsed.Seconds()) % 60
-    timeStr := fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+	if !isVisible || startTime.IsZero() {
+		return
+	}
 
-    // Create a logical font
-    font := win.LOGFONT{
-        LfHeight:         -48, // Negative value for character height
-        LfWidth:          0,   // Match height ratio
-        LfWeight:         win.FW_BOLD,
-        LfCharSet:        win.ANSI_CHARSET,
-        LfOutPrecision:   win.OUT_TT_PRECIS,
-        LfClipPrecision:  win.CLIP_DEFAULT_PRECIS,
-        LfQuality:        win.CLEARTYPE_QUALITY,
-        LfPitchAndFamily: win.DEFAULT_PITCH | win.FF_DONTCARE,
-    }
-    
-    // Copy "Arial" into the lfFaceName array
-    copy(font.LfFaceName[:], syscall.StringToUTF16("Arial"))
+	elapsed := time.Since(startTime)
+	hours := int(elapsed.Hours())
+	minutes := int(elapsed.Minutes()) % 60
+	seconds := int(elapsed.Seconds()) % 60
+	timeStr := fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 
-    // Create the font using CreateFontIndirect
-    hFont := win.CreateFontIndirect(&font)
-    if hFont == 0 {
-        return
-    }
-    defer win.DeleteObject(win.HGDIOBJ(hFont))
+	font := win.LOGFONT{
+		LfHeight:         -48,
+		LfWidth:          0,
+		LfWeight:         win.FW_BOLD,
+		LfCharSet:        win.ANSI_CHARSET,
+		LfOutPrecision:   win.OUT_TT_PRECIS,
+		LfClipPrecision:  win.CLIP_DEFAULT_PRECIS,
+		LfQuality:        win.CLEARTYPE_QUALITY,
+		LfPitchAndFamily: win.DEFAULT_PITCH | win.FF_DONTCARE,
+	}
+	copy(font.LfFaceName[:], syscall.StringToUTF16("Arial"))
 
-    // Select the new font into the DC
-    win.SelectObject(hdc, win.HGDIOBJ(hFont))
-    
-    // Set text color and background mode
-    win.SetTextColor(hdc, 0)
-    win.SetBkMode(hdc, win.TRANSPARENT)
+	hFont := win.CreateFontIndirect(&font)
+	if hFont == 0 {
+		return
+	}
+	defer win.DeleteObject(win.HGDIOBJ(hFont))
 
-    // Draw the text
-    win.TextOut(
-        hdc,
-        50,  // x position
-        30,  // y position
-        syscall.StringToUTF16Ptr(timeStr),
-        int32(len(timeStr)),
-    )
+	oldFont := win.SelectObject(hdc, win.HGDIOBJ(hFont))
+	defer win.SelectObject(hdc, oldFont)
+
+	win.SetTextColor(hdc, 0)
+	win.SetBkMode(hdc, win.TRANSPARENT)
+
+	// Get window client area dimensions
+	var rect win.RECT
+	win.GetClientRect(hwnd, &rect)
+
+	// Calculate center position for text
+	timeStrPtr := syscall.StringToUTF16Ptr(timeStr)
+	var size win.SIZE
+	win.GetTextExtentPoint32(hdc, timeStrPtr, int32(len(timeStr)), &size)
+
+	x := (rect.Right - rect.Left - int32(size.CX)) / 2
+	y := (rect.Bottom - rect.Top - int32(size.CY)) / 2
+
+	win.TextOut(
+		hdc,
+		x,
+		y,
+		timeStrPtr,
+		int32(len(timeStr)),
+	)
+}
+
+func updateTimer() {
+	if timer != nil {
+		timer.Stop()
+	}
+
+	timer = time.NewTicker(time.Second)
+
+	go func() {
+		for {
+			select {
+			case <-timer.C:
+				if isVisible {
+					win.InvalidateRect(hwnd, nil, true)
+					win.UpdateWindow(hwnd)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
 }
 
 func startServer() {
-    router := gin.Default()
+	router := gin.Default()
 
-    // API endpoint to create and start timer
-    router.POST("/create", func(c *gin.Context) {
-        startTime = time.Now()
-        isVisible = true
-        win.ShowWindow(hwnd, win.SW_SHOW)
-        win.SetWindowPos(hwnd, win.HWND_TOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE|win.SWP_NOSIZE)
-        win.UpdateWindow(hwnd)
+	router.POST("/create", func(c *gin.Context) {
+		startTime = time.Now()
+		isVisible = true
+		updateTimer()
+		win.ShowWindow(hwnd, win.SW_SHOW)
+		win.SetWindowPos(hwnd, win.HWND_TOPMOST, 0, 0, 0, 0, win.SWP_NOMOVE|win.SWP_NOSIZE)
+		win.UpdateWindow(hwnd)
+		c.JSON(http.StatusOK, gin.H{"message": "Timer started"})
+	})
 
-        // Start updating the timer display
-        go updateTimer()
+	router.POST("/reset", func(c *gin.Context) {
+		startTime = time.Now()
+		win.InvalidateRect(hwnd, nil, true)
+		win.UpdateWindow(hwnd)
+		c.JSON(http.StatusOK, gin.H{"message": "Timer reset"})
+	})
 
-        c.JSON(http.StatusOK, gin.H{"message": "Timer started"})
-    })
+	router.POST("/hide", func(c *gin.Context) {
+		isVisible = false
+		win.ShowWindow(hwnd, win.SW_HIDE)
+		c.JSON(http.StatusOK, gin.H{"message": "Timer hidden"})
+	})
 
-    // API endpoint to reset timer
-    router.POST("/reset", func(c *gin.Context) {
-        startTime = time.Now()
-        win.InvalidateRect(hwnd, nil, true)
-        c.JSON(http.StatusOK, gin.H{"message": "Timer reset"})
-    })
-
-    // API endpoint to hide timer
-    router.POST("/hide", func(c *gin.Context) {
-        isVisible = false
-        win.ShowWindow(hwnd, win.SW_HIDE)
-        c.JSON(http.StatusOK, gin.H{"message": "Timer hidden"})
-    })
-
-    if err := router.Run(":1997"); err != nil {
-        log.Fatal(err)
-    }
-}
-
-
-func updateTimer() {
-    ticker := time.NewTicker(time.Second)
-    defer ticker.Stop()
-
-    for range ticker.C {
-        if !isVisible {
-            continue
-        }
-        win.InvalidateRect(hwnd, nil, true)
-    }
+	if err := router.Run(":1997"); err != nil {
+		log.Fatal(err)
+	}
 }
